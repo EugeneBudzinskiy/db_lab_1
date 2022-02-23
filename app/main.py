@@ -1,131 +1,20 @@
 import os
 import time
-import logging
+
 import psycopg2
 
-from matplotlib import pyplot as plt
-from csv import writer as csv_writer
-from io import StringIO
-from sys import stdout
+from classes import FileArray
+from classes import LoggerEngine
 from config import *
 
+from functions import convert_result
+from functions import save_bar
+from functions import save_csv
+from functions import save_load_time
 
-class LoggerEngine:
-    def __init__(self):
-        self.log_level = logging.INFO
-
-        log_format = logging.Formatter('[%(asctime)s] [%(levelname)s] - %(message)s')
-        self.log = logging.getLogger(__name__)
-        self.log.setLevel(self.log_level)
-
-        handler = logging.StreamHandler(stdout)
-        handler.setLevel(self.log_level)
-        handler.setFormatter(log_format)
-        self.log.addHandler(handler)
-
-    def print_info(self, message: str):
-        self.log.info(message)
-
-
-class FileArray:
-    def __init__(self,
-                 cols_name: list,
-                 delimiter: str = ',',
-                 decimal: str = '.',
-                 nan_value: str = 'null',
-                 added_cols: list = None):
-        self.instructions = dict()
-
-        self.cols_name = cols_name
-        self.added_cols = added_cols
-
-        self.delimiter = delimiter
-        self.decimal = decimal
-        self.nan_value = nan_value
-
-    def add_file(self,
-                 filepath: str,
-                 cols_to_use: list,
-                 delimiter: str = ',',
-                 decimal: str = '.',
-                 encoding: str = 'utf-8',
-                 nan_value: str = 'null',
-                 value_to_add: list = None):
-
-        if filepath in self.instructions:
-            raise Exception(f'Error! File with path `{filepath}` already added!')
-
-        if len(cols_to_use) != len(self.cols_name):
-            raise Exception(f'Error! `cols_to_use` and `cols_new_names` have different lengths')
-
-        self.instructions[filepath] = dict()
-        self.instructions[filepath]['delimiter'] = delimiter
-        self.instructions[filepath]['decimal'] = decimal
-
-        self.instructions[filepath]['encoding'] = encoding
-        self.instructions[filepath]['cols_to_use'] = cols_to_use
-        self.instructions[filepath]['nan_value'] = nan_value
-
-        if self.added_cols is None:
-            if value_to_add is not None:
-                raise Exception(f'Error! Doesnt except value in `value_to_add`')
-
-            self.instructions[filepath]['value_to_add'] = value_to_add
-        else:
-            if len(self.added_cols) != len(value_to_add):
-                raise Exception(f'Error! `added_cols` and `value_to_add` have different lengths')
-
-            value_to_add_full = [None for _ in self.added_cols] if value_to_add is None else value_to_add
-            self.instructions[filepath]['value_to_add'] = value_to_add_full
-
-    def _str_processor(self, filepath: str, row_data: str, header_data: str):
-        data = [el.replace('"', '') for el in row_data.split(self.instructions[filepath]['delimiter'])]
-        header = [el.replace('"', '') for el in header_data.split(self.instructions[filepath]['delimiter'])]
-
-        buff = list()
-        for el in self.instructions[filepath]['cols_to_use']:
-            idx = header.index(el)
-            buff.append(data[idx])
-
-        for i in range(len(buff)):
-            buff[i] = buff[i].replace(self.instructions[filepath]['decimal'], self.decimal)
-            buff[i] = buff[i].replace(self.instructions[filepath]['nan_value'], self.nan_value)
-
-        for el in self.instructions[filepath]['value_to_add']:
-            buff.append(str(el))
-
-        return self.delimiter.join(buff)
-
-    def _file_processor(self, buffer: list, filepath: str, start_from: int, batch_size: int):
-        with open(filepath, 'r', encoding=self.instructions[filepath]['encoding']) as f:
-            header = f.readline()
-            k = 0
-            while True:
-                row = f.readline()
-                if row == '':
-                    return False, k
-
-                if k >= start_from:
-                    if k >= start_from + batch_size:
-                        return True, 0
-
-                    buffer.append(self._str_processor(filepath=filepath, row_data=row, header_data=header))
-
-                k += 1
-
-    def get_data_batch(self, start_from, batch_size: int = 100):
-        result = list()
-        start = start_from
-        for key in self.instructions.keys():
-            is_end, k_number = \
-                self._file_processor(buffer=result, filepath=key, start_from=start, batch_size=batch_size)
-            start -= k_number
-
-            if is_end:
-                break
-
-        file_header = self.delimiter.join(self.cols_name + self.added_cols)
-        return StringIO('\n'.join([file_header] + result)), len(result)
+from queries import get_sql_length
+from queries import get_sql_query
+from queries import get_sql_scheme
 
 
 def create_connection():
@@ -149,30 +38,6 @@ def execute_query(connection, sql_query):
     return None if len(buff) == 0 else buff
 
 
-def get_sql_scheme(table_name: str):
-    query = f'''
-    CREATE TABLE IF NOT EXISTS {table_name} (
-        ID CHAR(64) NOT NULL PRIMARY KEY,
-        REGION CHAR(256) NULL,
-        STATUS CHAR(100) NULL,
-        SCORE REAL NULL,
-        YEAR INTEGER NULL
-    );'''
-    return query
-
-
-def get_sql_query(table_name: str):
-    query = f'''
-    SELECT region, year, AVG(score) AS avg_score FROM {table_name}
-        WHERE status = 'Зараховано' GROUP BY region, year;
-    '''
-    return query
-
-
-def get_sql_length(table_name: str):
-    return f'''SELECT COUNT(*) FROM {table_name};'''
-
-
 def import_csv(connection, table_name: str, file_array: FileArray, batch_size: int = 10000):
     with connection.cursor() as curs:
         row_count = execute_query(connection, sql_query=get_sql_length(TABLE_NAME))[0][0]
@@ -189,78 +54,6 @@ def import_csv(connection, table_name: str, file_array: FileArray, batch_size: i
 def log_row_count(connection, logger_engine: LoggerEngine):
     row_count = execute_query(connection, sql_query=get_sql_length(TABLE_NAME))[0][0]
     logger_engine.print_info(f'Rows already loaded: {row_count}')
-
-
-def save_load_time(filepath: str, start: float, end: float):
-    template = 'Load time (s): {}'
-    try:
-        with open(filepath, 'r') as f:
-            file_data = f.read()
-            time_value = float(file_data.split(':')[-1].strip())
-
-        with open(filepath, 'w') as f:
-            f.write(template.format(time_value + (end - start)))
-
-    except FileNotFoundError:
-        with open(filepath, 'w') as f:
-            f.write(template.format(end - start))
-
-
-def save_bar(filepath: str,
-             labels: list,
-             a_values: list,
-             b_values: list,
-             a_label: str = 'A values',
-             b_label: str = 'B values',
-             title: str = 'Title',
-             y_label: str = 'y label',
-             vertical_labels: bool = False,
-             size_inches: tuple = None,
-             bar_width: float = .4):
-
-    x = [x for x in range(len(labels))]
-    fig, ax = plt.subplots()
-    if size_inches is not None:
-        fig.set_size_inches(*size_inches)
-
-    ax.bar([x - bar_width / 2 for x in x], a_values, bar_width, label=a_label)
-    ax.bar([x + bar_width / 2 for x in x], b_values, bar_width, label=b_label)
-
-    ax.set_ylabel(y_label)
-    ax.set_title(title)
-    ax.set_xticks(x)
-    rotation = 'vertical' if vertical_labels else 'horizontal'
-    ax.set_xticklabels(labels, rotation=rotation)
-    ax.legend()
-
-    fig.tight_layout()
-    plt.savefig(filepath)
-
-
-def convert_result(result: list, cutout_word: str, a_key, b_key):
-    res_dict = dict()
-    for el in result:
-        region, year, score = el
-        region = region.replace(cutout_word, '').strip()
-        if region not in res_dict:
-            res_dict[region] = dict()
-        res_dict[region][year] = score
-
-    labels = list(res_dict.keys())
-    a_values, b_values = list(), list()
-    for el in labels:
-        a_values.append(res_dict[el][a_key])
-        b_values.append(res_dict[el][b_key])
-
-    return labels, a_values, b_values
-
-
-def save_csv(data: list, header: list, filepath: str, encoding: str, delimiter: str):
-    with open(filepath, 'w', encoding=encoding) as f:
-        file_writer = csv_writer(f, delimiter=delimiter)
-        file_writer.writerow(list(map(str, header)))
-        for el in data:
-            file_writer.writerow(list(map(str, el)))
 
 
 def main():
