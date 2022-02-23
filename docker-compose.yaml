@@ -1,0 +1,28 @@
+version: "3.9"
+services:
+  database:
+    image: postgres:14.1-alpine
+    restart: on-failure
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: "admin"
+      POSTGRES_PASSWORD: "12345"
+      POSTGRES_DB: "lab_1_db"
+
+  app:
+    image: lab_1_app:1.1
+    build: .
+    restart: on-failure
+    expose:
+      - "8080"
+    ports:
+      - "8080:8080"
+    depends_on:
+      - database
+    environment:
+      PG_USER: "admin"
+      PG_PASSWORD: "12345"
+      PG_DB: "lab_1_db"
+      PG_HOST: "database"
+      PG_PORT: "5432"
